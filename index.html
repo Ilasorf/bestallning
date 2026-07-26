@@ -13917,33 +13917,35 @@ const fmt=n=>(Math.round(n*10)/10).toLocaleString('sv-SE');
 
 const SKIP=/^(må|ti|on|to|fr|lö|sö|måndag|tisdag|onsdag|torsdag|fredag|lördag|söndag|lunch|middag|allergen|råkost|n:|f:|olv:|meny|vecka)\b/i;
 
-function findRecipe(line){
-  const n=norm(line);
-  if(!n) return null;
-  if(ALIAS[n]) { const r=RECIPES.find(x=>x.title===ALIAS[n]); if(r) return {r,how:'alias'}; }
-  const nt=normTitle(line);
-  if(IDX.has(nt)) return {r:IDX.get(nt),how:'exakt'};
-  // innehåller (recepttitel finns i menyraden eller tvärtom)
-  let best=null;
-  for(const {r,n:rn} of TITLES){
-    if(rn.length<4) continue;
-    if(nt.includes(rn)||rn.includes(nt)){
-      const score=Math.min(rn.length,nt.length)/Math.max(rn.length,nt.length);
-      if(!best||score>best.score) best={r,score,how:'ungefär'};
+const STOP=new Set(['med','m','och','o','på','i','till','samt','ca','port','portioner','g','en','ett','av','de','&']);
+const nospace=s=>norm(s).replace(/ /g,'');
+const toks=s=>norm(s).split(' ').map(w=>CUT[w]||w).filter(w=>w&&!STOP.has(w));
+const RM=RECIPES.map(r=>({r,ns:nospace(r.title),tk:toks(r.title)}));
+function subseq(hay,need){ if(!need.length)return false;
+  for(let i=0;i+need.length<=hay.length;i++){let ok=true;for(let j=0;j<need.length;j++)if(hay[i+j]!==need[j]){ok=false;break;}if(ok)return true;} return false; }
+// returnerar { auto:[recipe...], guess:recipe|null }  — konservativ: aldrig påhittat
+function matchLine(line){
+  const an=norm(line); const lns=nospace(line), lt=toks(line);
+  if(ALIAS[an]){ const r=RECIPES.find(x=>x.title===ALIAS[an]); if(r) return {auto:[r],guess:null}; }
+  const hits=new Map();
+  for(const x of RM){
+    if(x.ns.length<4) continue;
+    if(x.ns===lns){ hits.set(x.r.title,{r:x.r,tk:x.tk}); continue; }
+    let done=false;
+    if(lns.includes(x.ns)||x.ns.includes(lns)){
+      const sc=Math.min(x.ns.length,lns.length)/Math.max(x.ns.length,lns.length);
+      if(sc>=0.7){ hits.set(x.r.title,{r:x.r,tk:x.tk}); done=true; }
     }
+    if(!done && x.tk.length && x.tk.join('').length>=5 && subseq(lt,x.tk)) hits.set(x.r.title,{r:x.r,tk:x.tk});
   }
-  if(best&&best.score>=0.6) return {r:best.r,how:'ungefär',score:best.score};
-  // token overlap som gissning (går till kontroll, aldrig auto)
-  const tks=new Set(nt.split(' ').filter(w=>w.length>2));
-  let g=null;
-  for(const {r,n:rn} of TITLES){
-    const rt=new Set(rn.split(' ').filter(w=>w.length>2));
-    let hit=0; tks.forEach(t=>{if(rt.has(t))hit++;});
-    const j=hit/(tks.size+rt.size-hit||1);
-    if(j>0.3&&(!g||j>g.j)) g={r,j};
-  }
-  if(g) return {r:g.r,how:'gissning'};
-  return null;
+  // ta bort träffar vars token är delmängd av en annan träff (Potatissallad ⊂ Fransk Potatissallad)
+  const arr=[...hits.values()];
+  const keep=arr.filter(a=>!arr.some(b=>b!==a && b.tk.length>a.tk.length && subseq(b.tk,a.tk)));
+  if(keep.length) return {auto:keep.map(k=>k.r),guess:null};
+  // ingen säker träff -> gissning (går till kontroll, aldrig auto)
+  let jb=null; const ct=new Set(lt);
+  for(const x of RM){ let h=0; const xs=new Set(x.tk); ct.forEach(t=>{if(xs.has(t))h++;}); const j=h/(ct.size+xs.size-h||1); if(j>0.45&&(!jb||j>jb.j)) jb={r:x.r,j}; }
+  return {auto:[],guess:jb?jb.r:null};
 }
 
 const DAYS=['Må','Ti','On','To','Fr','Lö','Sö'];
@@ -14022,13 +14024,11 @@ function runDishes(lines){
   const seen=new Set();
   for(const line of lines){
     if(seen.has(norm(line)))continue; seen.add(norm(line));
-    const m=findRecipe(line);
-    if(m && (m.how==='exakt'||m.how==='alias'||m.how==='ungefär')){
-      const hasQty = m.r.bulk.length||m.r.containers.length||m.r.per_portion.length;
-      if(!hasQty){ state.unmatched.push({line,rec:m.r,reason:'nq'}); continue; }
-      state.matched.push({line,rec:m.r,matsal:false,how:m.how});
-    } else if(m && m.how==='gissning'){
-      state.unmatched.push({line,rec:null,reason:'guess',guess:m.r});
+    const m=matchLine(line);
+    if(m.auto.length){
+      for(const r of m.auto) state.matched.push({line,rec:r,matsal:false,how:'auto'});
+    } else if(m.guess){
+      state.unmatched.push({line,rec:null,reason:'guess',guess:m.guess});
     } else {
       state.unmatched.push({line,rec:null,reason:'nf'});
     }
